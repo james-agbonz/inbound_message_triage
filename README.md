@@ -3,6 +3,10 @@
 This is an automation that handles inbound support messages end to end,it reads the message, figures out what it's about, logs it, and only pulls in a human when something genuinely needs one. Everything else gets handled automatically.
 
 ---
+## Loom video link
+watch the video here;
+https://www.loom.com/share/84d2d688347145c3a0dcfd57957537e9
+
 
 ## What it does
 
