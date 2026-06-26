@@ -1,6 +1,6 @@
 # Inbound Message Triage Pipeline
 
-This is an automation that handles inbound support messages end to end — it reads the message, figures out what it's about, logs it, and only pulls in a human when something genuinely needs one. Everything else gets handled automatically.
+This is an automation that handles inbound support messages end to end,it reads the message, figures out what it's about, logs it, and only pulls in a human when something genuinely needs one. Everything else gets handled automatically.
 
 ---
 
@@ -64,16 +64,16 @@ curl -X POST <YOUR_WEBHOOK_URL> -H 'Content-Type: application/json' \
 ## Key decisions and why
 
 **Guardrails that fail safe.**
-There are two validation layers. The first catches bad input before touching the AI. The second checks that the AI's response has the right shape and valid values. If either check fails, the pipeline doesn't crash or skip the message — it flags it for a human and logs it as `ai_fallback`. The reasoning: a message we couldn't understand is exactly the kind that shouldn't be quietly dropped.
+There are two validation layers. The first catches bad input before touching the AI. The second checks that the AI's response has the right shape and valid values. If either check fails, the pipeline doesn't crash or skip the message, it flags it for a human and logs it as `ai_fallback`. The reasoning: a message we couldn't understand is exactly the kind that shouldn't be quietly dropped.
 
 **Structure enforced at the API level.**
-The Gemini call uses `responseMimeType: application/json` with a strict `responseSchema` that locks down the allowed values for each field. The model physically can't return the wrong shape — it's not just prompt instructions we're hoping it follows.
+The Gemini call uses `responseMimeType: application/json` with a strict `responseSchema` that locks down the allowed values for each field. The model physically can't return the wrong shape, it's not just prompt instructions we're hoping it follows.
 
 **The human flag is two-sided.**
-The AI is told specifically when to flag (`needs_human: true`) — refunds, complaints, anger, chargeback threats — and specifically when not to — pricing questions, scheduling, general info. Without the second half, the model tends to over-flag and the human queue loses meaning.
+The AI is told specifically when to flag (`needs_human: true`) — refunds, complaints, anger, chargeback threats, and specifically when not to — pricing questions, scheduling, general info. Without the second half, the model tends to over-flag and the human queue loses meaning.
 
 **Everything gets logged.**
-Rejected payloads, duplicates, AI fallbacks — all get a row in the table with a `status` and an `error_note`. This makes the pipeline auditable: you can always see what came in, what happened to it, and why.
+Rejected payloads, duplicates, AI fallbacks all get a row in the table with a `status` and an `error_note`. This makes the pipeline auditable: you can always see what came in, what happened to it, and why.
 
 **Idempotency built in.**
 Each message gets a fingerprint (a hash of sender + channel + message). If the same message arrives twice, the second one is caught before the AI call and returns the original result instead of creating a duplicate row.
@@ -82,7 +82,6 @@ Each message gets a fingerprint (a hash of sender + channel + message). If the s
 
 ## What's next (given more time)
 
-- **A second AI verification pass** — a lightweight check that only runs when `needs_human: true`, to catch cases where the model over-flagged a message that's actually fine.
 - **Retry logic** on the AI call — backoff on rate limits before falling back to the safe default.
 - **Smarter notification routing** — Slack for high urgency, email digest for low.
 
