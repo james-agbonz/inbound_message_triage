@@ -47,7 +47,7 @@ Import `inbound_triage_workflow.json` into n8n, connect the Supabase credential,
 
 ---
 
-## Test it
+## Test commands (CURL)
 
 ```bash
 # Normal message — should classify and log with needs_human: false
