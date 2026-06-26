@@ -1,0 +1,542 @@
+{
+  "name": "Inbound Message Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "inbound-triage",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "90772fee-776b-42e0-9287-26dccfeb81af",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        400
+      ],
+      "webhookId": "6240c596-473a-40e4-a65d-f1b5da7a9748"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// First guardrail: reject bad input before spending an AI call.\nconst body = $json.body ?? $json;\nconst from = (body.from ?? '').toString().trim();\nconst channel = (body.channel ?? '').toString().trim();\nconst message = (body.message ?? '').toString().trim();\n\nconst valid = message.length > 0 && from.length > 0 && channel.length > 0;\n\n// Sandbox-safe hash (no require/crypto). FNV-1a over the meaningful fields.\nfunction hash(str) {\n  let h = 0x811c9dc5;\n  for (let i = 0; i < str.length; i++) {\n    h ^= str.charCodeAt(i);\n    h = (h * 0x01000193) >>> 0;\n  }\n  return h.toString(16).padStart(8, '0');\n}\n\nconst dedupe_hash = valid ? hash(`${from}|${channel}|${message}`) : null;\n\nreturn [{\n  json: {\n    valid,\n    from, channel, message,\n    dedupe_hash,\n    error_note: valid ? null : 'Invalid input: message/from/channel required and non-empty',\n  }\n}];\n"
+      },
+      "id": "074d6dd2-beb8-4b2b-a883-3d771f3e9a8a",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "309cb847-9108-4de7-ad05-271fa3724b05",
+              "leftValue": "={{ $json.valid.toBoolean() }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b8ffd808-3559-4216-aa11-36fe300c0aa2",
+      "name": "Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        440,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "inbound_messages",
+        "returnAll": false,
+        "limit": 1,
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "dedupe_hash",
+              "condition": "eq",
+              "keyValue": "={{ $json.dedupe_hash }}"
+            }
+          ]
+        }
+      },
+      "id": "5762219f-1fbe-48d8-a7af-0a7038b918f0",
+      "name": "Dedupe Lookup",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        660,
+        320
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_SUPABASE_CRED_ID",
+          "name": "Supabase account"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "68b03364-0e32-40ce-883e-8ae35087f843",
+              "leftValue": "={{ $json.dedupe_hash }}",
+              "rightValue": "={{ $('Validate Input').item.json.dedupe_hash }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "59fccf25-70e0-40e0-a246-4dba0f66ecc2",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"You are a support-inbox triage classifier. Classify the message below.\\n\\nFrom: {{ $('Validate Input').item.json.from }}\\nChannel: {{ $('Validate Input').item.json.channel }}\\nMessage: {{ $('Validate Input').item.json.message }}\\n\\nRules for needs_human:\\n- Set TRUE only for: refund requests, complaints, anger/frustration, legal or chargeback threats, cancellations, or anything financially or reputationally risky.\\n- Set FALSE for routine questions a standard reply can handle: pricing, discounts, how-to, scheduling, general info, simple sales questions.\\n- When unsure, prefer FALSE unless the message shows risk or dissatisfaction.\\n\\nOther rules:\\n- urgency: high only for time-sensitive or angry messages; medium for normal requests; low for casual info.\\n- suggested_reply: short, friendly, 1-3 sentences. Never promise a refund outright.\\n- Pick the single best category.\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"temperature\": 0.2,\n    \"responseMimeType\": \"application/json\",\n    \"responseSchema\": {\n      \"type\": \"OBJECT\",\n      \"properties\": {\n        \"category\": {\n          \"type\": \"STRING\",\n          \"enum\": [\n            \"billing\",\n            \"access_issue\",\n            \"sales_question\",\n            \"spam\",\n            \"other\"\n          ]\n        },\n        \"urgency\": {\n          \"type\": \"STRING\",\n          \"enum\": [\n            \"low\",\n            \"medium\",\n            \"high\"\n          ]\n        },\n        \"needs_human\": {\n          \"type\": \"BOOLEAN\"\n        },\n        \"suggested_reply\": {\n          \"type\": \"STRING\"\n        }\n      },\n      \"required\": [\n        \"category\",\n        \"urgency\",\n        \"needs_human\",\n        \"suggested_reply\"\n      ]\n    }\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "366664c9-10cf-4218-9eaf-adfd674039fe",
+      "name": "Classify (Gemini)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        240
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// Second guardrail: parse + schema-check the AI response.\n// On ANY problem, fail SAFE: flag for a human rather than drop the message.\nconst SAFE = {\n  category: 'other',\n  urgency: 'high',\n  needs_human: true,\n  suggested_reply: 'Thanks for reaching out \u2014 a team member will follow up with you shortly.',\n};\nconst CATS = ['billing','access_issue','sales_question','spam','other'];\nconst URG  = ['low','medium','high'];\n\nconst base = $('Validate Input').item.json;\nlet ai = null, status = 'processed', error_note = null;\n\ntry {\n  // Gemini returns candidates[0].content.parts[0].text containing JSON (responseMimeType=json)\n  const text = $json?.candidates?.[0]?.content?.parts?.[0]?.text;\n  if (!text) throw new Error('No text in AI response');\n  ai = JSON.parse(text);\n\n  const ok =\n    CATS.includes(ai.category) &&\n    URG.includes(ai.urgency) &&\n    typeof ai.needs_human === 'boolean' &&\n    typeof ai.suggested_reply === 'string' &&\n    ai.suggested_reply.trim().length > 0;\n\n  if (!ok) throw new Error('AI output failed schema validation');\n} catch (e) {\n  ai = SAFE;\n  status = 'ai_fallback';\n  error_note = 'AI fallback: ' + e.message;\n}\n\nreturn [{\n  json: {\n    from: base.from,\n    channel: base.channel,\n    message: base.message,\n    dedupe_hash: base.dedupe_hash,\n    category: ai.category,\n    urgency: ai.urgency,\n    needs_human: ai.needs_human,\n    suggested_reply: ai.suggested_reply,\n    status,\n    error_note,\n  }\n}];\n"
+      },
+      "id": "6fc9c721-3605-4ba8-857f-af68bee4a089",
+      "name": "Validate AI Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "inbound_messages",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "from_address",
+              "fieldValue": "={{ $json.from }}"
+            },
+            {
+              "fieldId": "channel",
+              "fieldValue": "={{ $json.channel }}"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{ $json.message }}"
+            },
+            {
+              "fieldId": "category",
+              "fieldValue": "={{ $json.category }}"
+            },
+            {
+              "fieldId": "urgency",
+              "fieldValue": "={{ $json.urgency }}"
+            },
+            {
+              "fieldId": "needs_human",
+              "fieldValue": "={{ $json.needs_human }}"
+            },
+            {
+              "fieldId": "suggested_reply",
+              "fieldValue": "={{ $json.suggested_reply }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "={{ $json.status }}"
+            },
+            {
+              "fieldId": "error_note",
+              "fieldValue": "={{ $json.error_note }}"
+            },
+            {
+              "fieldId": "dedupe_hash",
+              "fieldValue": "={{ $json.dedupe_hash }}"
+            },
+            {
+              "fieldId": "notified",
+              "fieldValue": "={{ $json.needs_human }}"
+            }
+          ]
+        }
+      },
+      "id": "65c892b3-553e-4b80-b212-ef95c92b1c3e",
+      "name": "Insert Row",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1540,
+        240
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_SUPABASE_CRED_ID",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4951ce1d-1d67-4368-9cdf-563cd8011a71",
+              "leftValue": "={{ $('Validate AI Output').item.json.needs_human }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "477d1ab9-1249-43a2-aea8-a687d0ca6ec7",
+      "name": "Needs Human?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"alert\": \"Human needed on inbound message\",\n  \"from\": \"{{ $('Validate AI Output').item.json.from }}\",\n  \"channel\": \"{{ $('Validate AI Output').item.json.channel }}\",\n  \"category\": \"{{ $('Validate AI Output').item.json.category }}\",\n  \"urgency\": \"{{ $('Validate AI Output').item.json.urgency }}\",\n  \"message\": \"{{ $('Validate AI Output').item.json.message }}\",\n  \"suggested_reply\": \"{{ $('Validate AI Output').item.json.suggested_reply }}\",\n  \"row_id\": \"{{ $('Insert Row').item.json.id }}\"\n}",
+        "options": {}
+      },
+      "id": "baa93676-02a2-4bb2-94fa-2ce6b1ad0323",
+      "name": "Notify Human",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"{{ $('Validate AI Output').item.json.status }}\",\n  \"from\": \"{{ $('Validate AI Output').item.json.from }}\",\n  \"category\": \"{{ $('Validate AI Output').item.json.category }}\",\n  \"urgency\": \"{{ $('Validate AI Output').item.json.urgency }}\",\n  \"needs_human\": \"{{ $('Validate AI Output').item.json.needs_human }}\",\n  \"notified\": \"{{ $('Validate AI Output').item.json.needs_human }}\",\n  \"suggested_reply\": \"{{ $('Validate AI Output').item.json.suggested_reply }}\",\n  \"id\": \"{{ $('Insert Row').item.json.id }}\"\n}",
+        "options": {}
+      },
+      "id": "849cab85-d9a0-4e03-9f20-24ffb9297ec3",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2200,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 200,
+        "responseBody": "={\n  \"status\": \"duplicate\",\n  \"message\": \"This message was already processed.\",\n  \"id\": \"{{ $json.id }}\",\n  \"category\": \"{{ $json.category }}\",\n  \"needs_human\": \"{{ $json.needs_human }}\"\n}",
+        "options": {}
+      },
+      "id": "1bbfbf6b-c8e3-4dc7-b3f5-9938c7ec0d14",
+      "name": "Respond Duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "inbound_messages",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "from_address",
+              "fieldValue": "={{ $json.from }}"
+            },
+            {
+              "fieldId": "channel",
+              "fieldValue": "={{ $json.channel }}"
+            },
+            {
+              "fieldId": "message",
+              "fieldValue": "={{ $json.message }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "rejected"
+            },
+            {
+              "fieldId": "error_note",
+              "fieldValue": "={{ $json.error_note }}"
+            }
+          ]
+        }
+      },
+      "id": "9f305488-3532-4046-8773-0cfeb12fcf94",
+      "name": "Log Rejected",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        660,
+        540
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "REPLACE_SUPABASE_CRED_ID",
+          "name": "Supabase account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 400,
+        "responseBody": "={\n  \"status\": \"rejected\",\n  \"error\": \"{{ $('Validate Input').item.json.error_note }}\"\n}",
+        "options": {}
+      },
+      "id": "5a58c1dd-b9cc-43ab-b0b6-103c275693d8",
+      "name": "Respond Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        540
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Is Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid?": {
+      "main": [
+        [
+          {
+            "node": "Dedupe Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Rejected": {
+      "main": [
+        [
+          {
+            "node": "Respond Reject",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedupe Lookup": {
+      "main": [
+        [
+          {
+            "node": "Is Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Respond Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify (Gemini)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify (Gemini)": {
+      "main": [
+        [
+          {
+            "node": "Validate AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate AI Output": {
+      "main": [
+        [
+          {
+            "node": "Insert Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Row": {
+      "main": [
+        [
+          {
+            "node": "Needs Human?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Human?": {
+      "main": [
+        [
+          {
+            "node": "Notify Human",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Human": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}
